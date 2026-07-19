@@ -134,6 +134,11 @@ func newConn(c OOBCapablePacketConn, supportsDF bool) (*oobConn, error) {
 	} else {
 		bc = ipv4.NewPacketConn(c)
 	}
+	// On darwin, replace the one-packet-per-recvmsg default with recvmsg_x batching (the
+	// analog of Linux recvmmsg). Nil on other platforms, leaving bc as chosen above.
+	if xbc := newRecvmsgXBatchConn(c); xbc != nil {
+		bc = xbc
+	}
 
 	msgs := make([]ipv4.Message, batchSize)
 	for i := range msgs {

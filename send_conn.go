@@ -39,6 +39,10 @@ type sconn struct {
 	// Used to catch the error sometimes returned by the first sendmsg call on Linux,
 	// see https://github.com/golang/go/issues/63322.
 	wroteFirstPacket bool
+
+	// batch holds the platform's batched-send state (*darwinBatch on darwin), or nil.
+	// Accessed only from the sendQueue.Run goroutine.
+	batch any
 }
 
 var _ sendConn = &sconn{}
@@ -103,6 +107,26 @@ func (c *sconn) writePacket(p []byte, addr net.Addr, oob []byte, gsoSize uint16,
 func (c *sconn) WriteTo(b []byte, addr net.Addr, info packetInfo) error {
 	_, err := c.WritePacket(b, addr, info.OOB(), 0, protocol.ECNUnsupported)
 	return err
+}
+
+// writeBatch sends several datagrams that share (gsoSize, ecn) to the current remote
+// address. On darwin (gsoSize always 0) it coalesces them into one sendmsg_x via
+// batchSend; on any platform where batchSend declines, it falls back to one WritePacket
+// per datagram. This satisfies the optional batchWriter interface the sendQueue uses.
+func (c *sconn) writeBatch(bufs [][]byte, gsoSize uint16, ecn protocol.ECN) error {
+	ai := c.remoteAddrInfo.Load()
+	if gsoSize == 0 {
+		if handled, err := c.batchSend(bufs, ai, ecn); handled {
+			c.wroteFirstPacket = true
+			return err
+		}
+	}
+	for _, b := range bufs {
+		if err := c.writePacket(b, ai.addr, ai.oob, gsoSize, ecn); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (c *sconn) capabilities() connCapabilities {
